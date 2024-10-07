@@ -88,9 +88,7 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.reply({ content: 'Invalid lobby identifier.', ephemeral: true });
       }
     } else {
-      // **Important:** Do **not** reply to select menu interactions not meant for global handling.
-      // This prevents the "Unknown select menu action." error for interactions handled by other collectors.
-      // Simply ignore them or handle them elsewhere.
+   
       return;
     }
   }
