@@ -10,6 +10,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 
+// Define valid lobby sizes and gamemodes
 const validLobbySizes = [
   { label: 'Small 2-8', value: 'small' },
   { label: 'Medium 9-16', value: 'medium' },
@@ -27,6 +28,12 @@ const validGamemodes = [
 
 // Helper functions
 
+/**
+ * Retrieves map options based on selected lobby sizes and gamemodes.
+ * @param {Array} selectedLobbySizes - Selected lobby size values.
+ * @param {Array} selectedGamemodes - Selected gamemode values.
+ * @returns {Array} - Filtered map options.
+ */
 function getMapOptions(selectedLobbySizes, selectedGamemodes) {
   const dataPath = path.join(__dirname, '../mapDatabase.json');
   let allMaps;
@@ -56,12 +63,22 @@ function getMapOptions(selectedLobbySizes, selectedGamemodes) {
   return filteredMaps;
 }
 
+/**
+ * Selects a specified number of random maps from the provided array.
+ * @param {Array} maps - Array of map objects.
+ * @param {number} count - Number of maps to select.
+ * @returns {Array} - Array of selected map objects.
+ */
 function selectRandomMaps(maps, count) {
   const shuffled = shuffleArray([...maps]);
   return shuffled.slice(0, count);
 }
 
-// Fisher-Yates Shuffle
+/**
+ * Shuffles an array using the Fisher-Yates algorithm.
+ * @param {Array} array - The array to shuffle.
+ * @returns {Array} - Shuffled array.
+ */
 function shuffleArray(array) {
   for (let i = array.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -86,25 +103,55 @@ module.exports = {
         return interaction.reply({ content: 'You are not hosting any active lobbies.', ephemeral: true });
       }
 
-      // Check if the user has the "Custom Games Manager" role
-      const guildMember = await interaction.guild.members.fetch(interaction.user.id);
-      const hasRole = guildMember.roles.cache.some(role => role.name === 'Custom Games Manager');
-      if (!hasRole) {
-        return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
-      }
+      // Create options for the lobby selection menu
+      const lobbyOptions = hostedLobbies.map(lobby => ({
+        label: lobby.lobbyId, // Lobby Name
+        description: `Players: ${lobby.members.length}/${lobby.maxSize}`,
+        value: lobby.lobbyId, // Unique identifier
+      }));
 
-      // Acknowledge the interaction immediately
-      await interaction.deferReply({ ephemeral: true });
+      // Create the lobby selection menu
+      const lobbySelectMenu = new StringSelectMenuBuilder()
+        .setCustomId('mapvote_select_lobby')
+        .setPlaceholder('Select a lobby to initiate a map vote')
+        .addOptions(lobbyOptions);
 
-      // Iterate through each hosted lobby and initiate map vote
-      for (const lobby of hostedLobbies) {
-        await initiateMapVoteForLobby(interaction, client, lobby);
-      }
+      const lobbyActionRow = new ActionRowBuilder().addComponents(lobbySelectMenu);
 
-      // Follow up to indicate that map votes have been initiated
-      await interaction.followUp({ content: 'Map votes have been initiated for your active lobbies.', ephemeral: true });
+      // Create an embed for the lobby selection prompt
+      const lobbySelectionEmbed = new EmbedBuilder()
+        .setTitle('Initiate Map Vote')
+        .setDescription('Please select the lobby you want to initiate a map vote for.')
+        .setColor(0x00AE86)
+        .setTimestamp();
+
+      // Send the lobby selection prompt
+      await interaction.reply({ embeds: [lobbySelectionEmbed], components: [lobbyActionRow], ephemeral: true });
+
+      // Create a collector to handle the lobby selection
+      const filter = i => i.customId === 'mapvote_select_lobby' && i.user.id === interaction.user.id;
+
+      const collector = interaction.channel.createMessageComponentCollector({ filter, componentType: ComponentType.StringSelect, time: 60000, max: 1 });
+
+      collector.on('collect', async i => {
+        const selectedLobbyId = i.values[0];
+        const selectedLobby = client.lobbies.get(selectedLobbyId);
+
+        if (!selectedLobby) {
+          return i.update({ content: 'Selected lobby not found or has been closed.', embeds: [], components: [] });
+        }
+
+        // Proceed to select lobby size and gamemode
+        await initiateLobbySettingsSelection(i, client, selectedLobby);
+      });
+
+      collector.on('end', async collected => {
+        if (collected.size === 0) {
+          await interaction.editReply({ content: 'Map vote initiation timed out. Please try again.', embeds: [], components: [] });
+        }
+      });
     } catch (error) {
-      console.error('Error executing command mapvote:', error);
+      console.error('Error executing command /mapvote:', error);
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ content: 'There was an error executing the map vote command.', ephemeral: true });
       } else {
@@ -114,13 +161,15 @@ module.exports = {
   },
 };
 
-// Function to initiate map vote for a specific lobby
-async function initiateMapVoteForLobby(interaction, client, lobby) {
+/**
+ * Handles the lobby size and gamemode selection for a specific lobby.
+ * @param {Interaction} interaction - The interaction object from the lobby selection.
+ * @param {Client} client - The Discord client instance.
+ * @param {Object} lobby - The selected lobby object.
+ */
+async function initiateLobbySettingsSelection(interaction, client, lobby) {
   try {
-    // Update the lobby's last active timestamp
-    lobby.lastActive = Date.now();
-
-    // Create selection menus with unique customIds
+    // Create selection menus for lobby size and gamemode
     const lobbySizeMenu = new StringSelectMenuBuilder()
       .setCustomId(`mapvote_select_lobbysize_${lobby.lobbyId}`)
       .setPlaceholder('Select Lobby Sizes')
@@ -136,49 +185,46 @@ async function initiateMapVoteForLobby(interaction, client, lobby) {
       .addOptions(validGamemodes);
 
     // Action rows to hold the menus
-    const row1 = new ActionRowBuilder().addComponents(lobbySizeMenu);
-    const row2 = new ActionRowBuilder().addComponents(gamemodeMenu);
+    const sizeActionRow = new ActionRowBuilder().addComponents(lobbySizeMenu);
+    const gamemodeActionRow = new ActionRowBuilder().addComponents(gamemodeMenu);
 
-    // Send the selection menus to the channel where the lobby was created
-    const channel = interaction.guild.channels.cache.get(lobby.channelId) || interaction.channel;
+    // Create an embed for the settings selection prompt
+    const settingsSelectionEmbed = new EmbedBuilder()
+      .setTitle(`Map Vote Settings for Lobby: ${lobby.lobbyId}`)
+      .setDescription('Please select the desired lobby size and gamemode for the map vote.')
+      .setColor(0x00AE86)
+      .setTimestamp();
 
-    // Log the initiation
-    console.log(`Initiating map vote for Lobby: ${lobby.lobbyId} in Channel: ${channel.name} (${channel.id})`);
+    // Send the settings selection prompt
+    await interaction.update({ embeds: [settingsSelectionEmbed], components: [sizeActionRow, gamemodeActionRow], content: null });
 
-    const selectionMessage = await channel.send({
-      content: `**Lobby: ${lobby.lobbyId}**\nPlease select the lobby sizes and gamemodes for the map vote.`,
-      components: [row1, row2],
-    });
-
-    // Create a collector to handle selections for this lobby
-    const filter = (i) =>
+    // Create a collector to handle the settings selections
+    const filter = i =>
       (i.customId === `mapvote_select_lobbysize_${lobby.lobbyId}` ||
         i.customId === `mapvote_select_gamemode_${lobby.lobbyId}`) &&
       i.user.id === interaction.user.id;
 
-    const collector = selectionMessage.createMessageComponentCollector({
-      filter,
-      componentType: ComponentType.StringSelect,
-      time: 60000, // 60 seconds
-    });
+    const collector = interaction.channel.createMessageComponentCollector({ filter, componentType: ComponentType.StringSelect, time: 60000 });
 
     const selections = {
       lobbySizes: null,
       gamemodes: null,
     };
 
-    collector.on('collect', async (selectInteraction) => {
+    collector.on('collect', async selectInteraction => {
       if (selectInteraction.customId === `mapvote_select_lobbysize_${lobby.lobbyId}`) {
         selections.lobbySizes = selectInteraction.values;
         await selectInteraction.update({
-          content: `**Lobby: ${lobby.lobbyId}**\nLobby sizes selected: ${selections.lobbySizes.join(', ')}\nNow select gamemodes.`,
-          components: [row2], // Show only gamemode select menu
+          embeds: [settingsSelectionEmbed.setDescription(`Lobby sizes selected: ${selections.lobbySizes.join(', ')}\nNow select gamemodes.`)],
+          components: [gamemodeActionRow],
+          content: null,
         });
       } else if (selectInteraction.customId === `mapvote_select_gamemode_${lobby.lobbyId}`) {
         selections.gamemodes = selectInteraction.values;
         await selectInteraction.update({
-          content: `**Lobby: ${lobby.lobbyId}**\nGamemodes selected: ${selections.gamemodes.join(', ')}`,
-          components: [], // Remove select menus after selections
+          embeds: [settingsSelectionEmbed.setDescription(`Gamemodes selected: ${selections.gamemodes.join(', ')}`)],
+          components: [],
+          content: null,
         });
 
         // Proceed with the map vote
@@ -187,24 +233,28 @@ async function initiateMapVoteForLobby(interaction, client, lobby) {
       }
     });
 
-    collector.on('end', async (collected) => {
+    collector.on('end', async collected => {
       if (!selections.lobbySizes || !selections.gamemodes) {
-        await channel.send({
-          content: `**Lobby: ${lobby.lobbyId}**\nMap vote setup timed out.`,
-        });
+        await interaction.editReply({ content: `**Lobby: ${lobby.lobbyId}**\nMap vote setup timed out.`, embeds: [], components: [] });
       }
     });
   } catch (error) {
-    console.error('Error initiating map vote for lobby:', error);
-    // Send error message directly to the channel
-    const channel = interaction.guild.channels.cache.get(lobby.channelId) || interaction.channel;
+    console.error('Error during lobby settings selection:', error);
+    const channel = client.channels.cache.get(lobby.messageChannelId) || interaction.channel;
     await channel.send({
-      content: `**Lobby: ${lobby.lobbyId}**\nThere was an error initiating the map vote.`,
+      content: `**Lobby: ${lobby.lobbyId}**\nThere was an error during the map vote setup.`,
     });
   }
 }
 
-// Function to initiate map vote after selections are made
+/**
+ * Initiates the map vote after lobby size and gamemode selections are made.
+ * @param {Interaction} interaction - The original interaction object.
+ * @param {Client} client - The Discord client instance.
+ * @param {Object} lobby - The lobby object.
+ * @param {Array} selectedLobbySizes - Selected lobby size values.
+ * @param {Array} selectedGamemodes - Selected gamemode values.
+ */
 async function initiateMapVote(interaction, client, lobby, selectedLobbySizes, selectedGamemodes) {
   try {
     // Fetch map options based on selections
@@ -212,7 +262,7 @@ async function initiateMapVote(interaction, client, lobby, selectedLobbySizes, s
 
     if (mapOptions.length === 0) {
       return interaction.followUp({
-        content: `**Lobby: ${lobby.lobbyId}**\nNo maps found matching the criteria.`,
+        content: `**Lobby: ${lobby.lobbyId}**\nNo maps found matching the selected criteria.`,
         ephemeral: true,
       });
     }
@@ -235,10 +285,10 @@ async function initiateMapVote(interaction, client, lobby, selectedLobbySizes, s
       .setTimestamp();
 
     // Send the voting message in the lobby's channel
-    const channel = interaction.guild.channels.cache.get(lobby.channelId) || interaction.channel;
+    const channel = client.channels.cache.get(lobby.messageChannelId) || interaction.channel;
     const voteMessage = await channel.send({
       embeds: [embed],
-      content: 'React with the corresponding number to vote for your preferred map!',
+      content: 'React to vote for the next map! 30 seconds until voting closes.',
     });
 
     // React with number emojis
@@ -252,9 +302,9 @@ async function initiateMapVote(interaction, client, lobby, selectedLobbySizes, s
       return numberEmojis.includes(reaction.emoji.name) && !user.bot;
     };
 
-    const collector = voteMessage.createReactionCollector({ filter, time: 20000 });
+    const collector = voteMessage.createReactionCollector({ filter, time: 30000 });
 
-    collector.on('end', async (collected) => {
+    collector.on('end', async collected => {
       if (collected.size === 0) {
         // No reactions were added; proceed with random selection
         const randomIndex = Math.floor(Math.random() * selectedMaps.length);
@@ -268,7 +318,7 @@ async function initiateMapVote(interaction, client, lobby, selectedLobbySizes, s
       // Tally votes based on reactions
       const voteCounts = {};
 
-      collected.forEach((reaction) => {
+      collected.forEach(reaction => {
         // Exclude the bot's own reactions
         const count = reaction.count - 1; // Subtract 1 for the bot's initial reaction
 
@@ -320,7 +370,7 @@ async function initiateMapVote(interaction, client, lobby, selectedLobbySizes, s
   } catch (error) {
     console.error('Error during map voting:', error);
     // Send error message directly to the channel
-    const channel = interaction.guild.channels.cache.get(lobby.channelId) || interaction.channel;
+    const channel = client.channels.cache.get(lobby.messageChannelId) || interaction.channel;
     await channel.send({
       content: `**Lobby: ${lobby.lobbyId}**\nThere was an error during the map vote.`,
     });
